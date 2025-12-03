@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-// import 'package:singlelinedraw/pause_screen.dart';
 import 'package:singlelinedraw/levels_data.dart';
 import 'package:singlelinedraw/level_screen.dart';
 
