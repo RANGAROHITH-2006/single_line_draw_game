@@ -54,8 +54,9 @@ class GamePainter extends CustomPainter {
       final totalLength = pathMetric.length;
       
       // Check which parts of this segment have NOT been drawn
-      const int numSegments = 200;
-      for (int i = 0; i < numSegments; i++) {
+      // Using 100 discrete positions to match the controller
+      const int numSegments = 100;
+      for (int i = 0; i <= numSegments; i++) {
         String segmentId = '${segmentIndex}_$i';
         
         if (!drawnSegments.contains(segmentId)) {
@@ -64,7 +65,7 @@ class GamePainter extends CustomPainter {
           final endDistance = ((i + 1) / numSegments) * totalLength;
           
           try {
-            final segmentPath = pathMetric.extractPath(startDistance, endDistance);
+            final segmentPath = pathMetric.extractPath(startDistance, endDistance.clamp(0, totalLength));
             canvas.drawPath(segmentPath, paint);
           } catch (e) {
             // Handle any path extraction errors gracefully
@@ -102,8 +103,9 @@ class GamePainter extends CustomPainter {
       final totalLength = pathMetric.length;
       
       // Check which parts of this segment have been drawn
-      const int numSegments = 200;
-      for (int i = 0; i < numSegments; i++) {
+      // Using 100 discrete positions to match the controller
+      const int numSegments = 100;
+      for (int i = 0; i <= numSegments; i++) {
         String segmentId = '${segmentIndex}_$i';
         
         if (drawnSegments.contains(segmentId)) {
@@ -112,7 +114,7 @@ class GamePainter extends CustomPainter {
           final endDistance = ((i + 1) / numSegments) * totalLength;
           
           try {
-            final segmentPath = pathMetric.extractPath(startDistance, endDistance);
+            final segmentPath = pathMetric.extractPath(startDistance, endDistance.clamp(0, totalLength));
             canvas.drawPath(segmentPath, paint);
           } catch (e) {
             // Handle any path extraction errors gracefully

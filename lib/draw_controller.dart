@@ -76,8 +76,9 @@ class DrawController extends ChangeNotifier {
       _markSegmentAsDrawn(localPosition);
       _updateProgress();
       
-      // Check for completion
-      if (progress >= 1) { // 100% completion threshold
+      // Check for completion - use 95% threshold to account for path detection tolerance
+      // This prevents the issue where visually complete paths show as incomplete
+      if (progress >= 0.96) {
         _completeLevel();
       }
       
@@ -140,13 +141,14 @@ class DrawController extends ChangeNotifier {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
       
-      for (double distance = 0; distance < length; distance += 1) {
+      for (double distance = 0; distance <= length; distance += 1) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
           if (currentDistance <= tolerance) {
             // Create a unique identifier for this segment
-            int discretePosition = (distance / length * 200).round();
+            // Use 100 discrete positions for better accuracy
+            int discretePosition = (distance / length * 100).round();
             String segmentId = '${segmentIndex}_$discretePosition';
             drawnSegments.add(segmentId);
           }
@@ -185,19 +187,22 @@ class DrawController extends ChangeNotifier {
     Set<String> uniqueSegments = drawnSegments;
     
     // Each unique segment represents a portion of the total path
+    // Using 101 positions (0-100 inclusive)
+    const int numPositions = 101;
+    
     for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
       double segmentLength = pathSegments[segmentIndex].length;
       
       // Count how many discrete positions are drawn for this segment
       int drawnPositions = 0;
-      for (int position = 0; position <= 200; position++) {
+      for (int position = 0; position <= 100; position++) {
         if (uniqueSegments.contains('${segmentIndex}_$position')) {
           drawnPositions++;
         }
       }
       
       // Calculate percentage of this segment that's drawn
-      double segmentProgress = drawnPositions / 200.0;
+      double segmentProgress = drawnPositions / numPositions;
       drawnLength += segmentLength * segmentProgress;
     }
     
