@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 /// Game Painter
 /// Custom painter for rendering the SVG outline and user's drawing stroke
 /// Handles visual feedback for the single line drawing game
+/// Now includes vertex visualization for better path understanding
 class GamePainter extends CustomPainter {
   final Path? svgPath;
   final List<Offset> userPath;
@@ -12,6 +13,8 @@ class GamePainter extends CustomPainter {
   final double progress;
   final bool isGameCompleted;
   final bool hasError;
+  final List<Offset> vertices; // Vertex points for display
+  final bool showVertices; // Whether to show vertex indicators
   
   GamePainter({
     required this.svgPath,
@@ -21,6 +24,8 @@ class GamePainter extends CustomPainter {
     required this.progress,
     required this.isGameCompleted,
     required this.hasError,
+    this.vertices = const [],
+    this.showVertices = false, // Keep vertices invisible by default
   });
   
   @override
@@ -33,8 +38,36 @@ class GamePainter extends CustomPainter {
     // Draw the traced path segments (colored) - this will overlay the original path
     _drawTracedSegments(canvas);
     
+    // Draw vertex points as visual indicators
+    if (showVertices) {
+      _drawVertices(canvas);
+    }
+    
     // Draw current touch point if actively drawing
     _drawTouchPoint(canvas);
+  }
+  
+  /// Draw vertex points as small dots to indicate key path points
+  void _drawVertices(Canvas canvas) {
+    if (vertices.isEmpty) return;
+    
+    // Outer ring for vertex
+    final outerPaint = Paint()
+      ..color = Colors.white.withOpacity(0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+    
+    // Inner dot for vertex
+    final innerPaint = Paint()
+      ..color = const Color(0xFFFFD700).withOpacity(0.8) // Gold color
+      ..style = PaintingStyle.fill;
+    
+    for (final vertex in vertices) {
+      // Draw outer ring
+      canvas.drawCircle(vertex, 6.0, outerPaint);
+      // Draw inner dot
+      canvas.drawCircle(vertex, 3.0, innerPaint);
+    }
   }
   
   /// Draw the original SVG path outline for untraced segments only
@@ -166,7 +199,8 @@ class GamePainter extends CustomPainter {
            oldDelegate.drawnRanges.length != drawnRanges.length ||
            oldDelegate.progress != progress ||
            oldDelegate.isGameCompleted != isGameCompleted ||
-           oldDelegate.hasError != hasError;
+           oldDelegate.hasError != hasError ||
+           oldDelegate.vertices.length != vertices.length;
   }
 }
 

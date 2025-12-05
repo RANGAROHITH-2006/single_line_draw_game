@@ -66,8 +66,17 @@ class _LevelScreenState extends State<LevelScreen> {
         containerHeight,
       );
       
-      // Initialize the draw controller with the transformed path
-      drawController.initializeWithPath(transformedSvgPath!);
+      // Transform vertices to match the path transformation
+      final transformedVertices = SvgPathParser.transformVertices(
+        svgPathData.vertices,
+        svgPathData.viewBoxWidth,
+        svgPathData.viewBoxHeight,
+        containerWidth,
+        containerHeight,
+      );
+      
+      // Initialize the draw controller with the transformed path and vertices
+      drawController.initializeWithVertices(transformedSvgPath!, transformedVertices);
       
       setState(() {
         isLoading = false;
@@ -365,6 +374,8 @@ class _LevelScreenState extends State<LevelScreen> {
                       progress: drawController.progress,
                       isGameCompleted: drawController.isGameCompleted,
                       hasError: drawController.hasError,
+                      vertices: drawController.vertices,
+                      showVertices: false, // Keep vertices invisible
                     ),
                   );
                 },

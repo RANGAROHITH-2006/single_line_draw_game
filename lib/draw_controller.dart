@@ -5,6 +5,7 @@ import 'package:singlelinedraw/svg_path_parser.dart';
 /// Draw Controller
 /// Manages the drawing interaction, path validation, and game state
 /// Handles gesture recognition, progress tracking, and completion detection
+/// Now with vertex-aware segment drawing for better path tracing
 class DrawController extends ChangeNotifier {
   // Game state
   bool isDrawing = false;
@@ -29,6 +30,10 @@ class DrawController extends ChangeNotifier {
   // Path metrics
   List<ui.PathMetric> pathSegments = [];
   double totalPathLength = 0.0;
+  
+  // Vertex-based segments
+  List<PathSegmentInfo> vertexSegments = [];
+  List<Offset> transformedVertices = [];
 
   // Callbacks
   VoidCallback? onLevelComplete;
@@ -47,7 +52,76 @@ class DrawController extends ChangeNotifier {
 
     reset();
   }
+  
+  /// Initialize with vertex information for better segment tracking
+  void initializeWithVertices(Path transformedPath, List<Offset> vertices) {
+    svgPath = transformedPath;
+    pathSegments = SvgPathParser.getPathSegments(transformedPath);
+    totalPathLength = SvgPathParser.getPathLength(transformedPath);
+    transformedVertices = vertices;
+    
+    // Extract vertex-based segments
+    vertexSegments = SvgPathParser.extractSegmentsWithVertices(transformedPath, vertices);
+    
+    // If not enough segments found, ensure minimum by sampling
+    if (vertexSegments.isEmpty && pathSegments.isNotEmpty) {
+      // Fall back to simple segment extraction
+      _createDefaultVertexSegments();
+    }
 
+    // Initialize empty ranges for each segment
+    drawnRanges = List.generate(pathSegments.length, (_) => []);
+
+    reset();
+  }
+  
+  /// Create default vertex segments by sampling the path
+  void _createDefaultVertexSegments() {
+    vertexSegments = [];
+    transformedVertices = [];
+    
+    for (int i = 0; i < pathSegments.length; i++) {
+      final metric = pathSegments[i];
+      final length = metric.length;
+      
+      // Sample at least 5 points along each path metric
+      final numPoints = (length / 50).ceil().clamp(5, 20);
+      final step = length / numPoints;
+      
+      List<double> sampleDistances = [];
+      for (int j = 0; j <= numPoints; j++) {
+        sampleDistances.add((j * step).clamp(0.0, length));
+      }
+      
+      // Create segments between sample points
+      for (int j = 0; j < sampleDistances.length - 1; j++) {
+        final startTangent = metric.getTangentForOffset(sampleDistances[j]);
+        final endTangent = metric.getTangentForOffset(sampleDistances[j + 1]);
+        
+        if (startTangent != null && endTangent != null) {
+          if (j == 0 || !transformedVertices.contains(startTangent.position)) {
+            transformedVertices.add(startTangent.position);
+          }
+          if (!transformedVertices.contains(endTangent.position)) {
+            transformedVertices.add(endTangent.position);
+          }
+          
+          vertexSegments.add(PathSegmentInfo(
+            pathMetricIndex: i,
+            startVertex: startTangent.position,
+            endVertex: endTangent.position,
+            startDistance: sampleDistances[j],
+            endDistance: sampleDistances[j + 1],
+            startVertexIndex: transformedVertices.length - 2,
+            endVertexIndex: transformedVertices.length - 1,
+          ));
+        }
+      }
+    }
+  }
+  
+  /// Get vertices for display
+  List<Offset> get vertices => transformedVertices;
   /// Handle pan start - begin drawing
   void onPanStart(DragStartDetails details) {
     if (isGameCompleted) return;
@@ -68,7 +142,8 @@ class DrawController extends ChangeNotifier {
       errorMessage = null;
 
       // Mark starting segment as drawn and set it as active
-      _markSegmentAsDrawnAndSetActive(localPosition);
+      // This now fills from the nearest vertex when starting mid-segment
+      _markSegmentAsDrawnAndSetActiveFromVertex(localPosition);
 
       notifyListeners();
     }
@@ -195,6 +270,110 @@ class DrawController extends ChangeNotifier {
       double rangeEnd = (bestDistance + tolerance / 2).clamp(0, length);
       _addRange(bestSegmentIndex, rangeStart, rangeEnd);
     }
+  }
+  
+  /// Mark a point on the path as drawn and set the active segment
+  /// When starting from middle of a segment, fills from the nearest vertex ON THE SAME PATH
+  void _markSegmentAsDrawnAndSetActiveFromVertex(Offset point) {
+    // Find the closest point on the path
+    int? bestSegmentIndex;
+    double? bestDistance;
+    double bestMinDist = double.infinity;
+
+    for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
+      final pathMetric = pathSegments[segmentIndex];
+      final length = pathMetric.length;
+
+      for (double distance = 0; distance <= length; distance += 1) {
+        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
+        if (tangent != null) {
+          final double currentDist = (point - tangent.position).distance;
+          if (currentDist <= tolerance && currentDist < bestMinDist) {
+            bestMinDist = currentDist;
+            bestSegmentIndex = segmentIndex;
+            bestDistance = distance;
+          }
+        }
+      }
+    }
+
+    if (bestSegmentIndex == null || bestDistance == null) return;
+
+    _activeSegmentIndex = bestSegmentIndex;
+    _lastDistanceOnSegment = bestDistance;
+
+    final pathMetric = pathSegments[bestSegmentIndex];
+    final length = pathMetric.length;
+
+    // Find the nearest vertex ON THIS SAME PATH SEGMENT only
+    // This ensures we don't fill towards vertices on other paths
+    double nearestVertexPathDist = 0;
+    double nearestVertexScreenDist = double.infinity;
+
+    // Always consider start of this path segment as a vertex
+    final startTangent = pathMetric.getTangentForOffset(0);
+    if (startTangent != null) {
+      final distToStart = (point - startTangent.position).distance;
+      if (distToStart < nearestVertexScreenDist) {
+        nearestVertexScreenDist = distToStart;
+        nearestVertexPathDist = 0;
+      }
+    }
+
+    // Always consider end of this path segment as a vertex
+    final endTangent = pathMetric.getTangentForOffset(length);
+    if (endTangent != null) {
+      final distToEnd = (point - endTangent.position).distance;
+      if (distToEnd < nearestVertexScreenDist) {
+        nearestVertexScreenDist = distToEnd;
+        nearestVertexPathDist = length;
+      }
+    }
+
+    // Check intermediate vertices ONLY if they are on THIS path segment
+    // Use a strict tolerance to ensure vertex is actually on this path
+    for (final vertex in transformedVertices) {
+      final vertexDistOnPath = _findClosestDistanceOnSegmentStrict(vertex, bestSegmentIndex, 8.0);
+      if (vertexDistOnPath != null) {
+        final distToVertex = (point - vertex).distance;
+        if (distToVertex < nearestVertexScreenDist) {
+          nearestVertexScreenDist = distToVertex;
+          nearestVertexPathDist = vertexDistOnPath;
+        }
+      }
+    }
+
+    // Fill from nearest vertex (on same path) to touch point
+    double rangeStart = bestDistance < nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
+    double rangeEnd = bestDistance > nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
+    
+    // Extend range slightly for tolerance
+    rangeStart = (rangeStart - tolerance / 2).clamp(0.0, length);
+    rangeEnd = (rangeEnd + tolerance / 2).clamp(0.0, length);
+    
+    _addRange(bestSegmentIndex, rangeStart, rangeEnd);
+  }
+  
+  /// Find distance on segment with strict tolerance (for vertex matching on same path)
+  double? _findClosestDistanceOnSegmentStrict(Offset point, int segmentIndex, double strictTolerance) {
+    final pathMetric = pathSegments[segmentIndex];
+    final length = pathMetric.length;
+
+    double? closestDistance;
+    double minDist = double.infinity;
+
+    for (double distance = 0; distance <= length; distance += 1) {
+      final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
+      if (tangent != null) {
+        final double currentDist = (point - tangent.position).distance;
+        if (currentDist <= strictTolerance && currentDist < minDist) {
+          minDist = currentDist;
+          closestDistance = distance;
+        }
+      }
+    }
+
+    return closestDistance;
   }
 
   /// Add a range to a segment, merging with existing overlapping ranges
