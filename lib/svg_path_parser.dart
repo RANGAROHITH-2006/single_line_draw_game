@@ -51,11 +51,15 @@ class SvgPathParser {
       }
       
       // Remove duplicate vertices that are too close together
-      allVertices = _removeDuplicateVertices(allVertices, 5.0);
+      allVertices = _removeDuplicateVertices(allVertices, 8.0);
+      
+      // Add intersection vertices for complex paths
+      allVertices.addAll(_detectPathIntersections(combinedPath));
+      allVertices = _removeDuplicateVertices(allVertices, 8.0);
       
       // Ensure minimum vertices by sampling the path if needed
-      if (allVertices.length < 4) {
-        allVertices = _sampleVerticesFromPath(combinedPath, 8);
+      if (allVertices.length < 3) {
+        allVertices = _sampleVerticesFromPath(combinedPath, 6);
       }
       
       return SvgPathData(
@@ -70,7 +74,8 @@ class SvgPathParser {
   }
   
   /// Extract vertex points from SVG path data string
-  /// Parses M, L, H, V, C, S, Q, T, A, Z commands to find key points
+  /// Only extracts ACTUAL corner/edge points on the path border
+  /// Ignores control points from curves to avoid unwanted points
   static List<Offset> _extractVerticesFromPathData(String pathData) {
     List<Offset> vertices = [];
     
@@ -168,67 +173,64 @@ class SvgPathParser {
           }
           break;
           
-        case 'C': // Absolute cubic bezier
+        case 'C': // Absolute cubic bezier - ONLY endpoint, skip control points
           for (int i = 0; i < numbers.length - 5; i += 6) {
-            // Add control points and endpoint as vertices for curves
-            // Control point 1
-            vertices.add(Offset(numbers[i], numbers[i + 1]));
-            // Control point 2
-            vertices.add(Offset(numbers[i + 2], numbers[i + 3]));
-            // Endpoint
+            // Skip control points [i], [i+1], [i+2], [i+3]
+            // Only add the ENDPOINT which is on the actual path border
             currentX = numbers[i + 4];
             currentY = numbers[i + 5];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'c': // Relative cubic bezier
+        case 'c': // Relative cubic bezier - ONLY endpoint
           for (int i = 0; i < numbers.length - 5; i += 6) {
-            vertices.add(Offset(currentX + numbers[i], currentY + numbers[i + 1]));
-            vertices.add(Offset(currentX + numbers[i + 2], currentY + numbers[i + 3]));
+            // Skip control points, only endpoint
             currentX += numbers[i + 4];
             currentY += numbers[i + 5];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'S': // Absolute smooth cubic bezier
+        case 'S': // Absolute smooth cubic bezier - ONLY endpoint
           for (int i = 0; i < numbers.length - 3; i += 4) {
-            vertices.add(Offset(numbers[i], numbers[i + 1]));
+            // Skip control point [i], [i+1]
+            // Only add endpoint
             currentX = numbers[i + 2];
             currentY = numbers[i + 3];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 's': // Relative smooth cubic bezier
+        case 's': // Relative smooth cubic bezier - ONLY endpoint
           for (int i = 0; i < numbers.length - 3; i += 4) {
-            vertices.add(Offset(currentX + numbers[i], currentY + numbers[i + 1]));
+            // Skip control point, only endpoint
             currentX += numbers[i + 2];
             currentY += numbers[i + 3];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'Q': // Absolute quadratic bezier
+        case 'Q': // Absolute quadratic bezier - ONLY endpoint
           for (int i = 0; i < numbers.length - 3; i += 4) {
-            vertices.add(Offset(numbers[i], numbers[i + 1]));
+            // Skip control point [i], [i+1]
+            // Only add endpoint
             currentX = numbers[i + 2];
             currentY = numbers[i + 3];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'q': // Relative quadratic bezier
+        case 'q': // Relative quadratic bezier - ONLY endpoint
           for (int i = 0; i < numbers.length - 3; i += 4) {
-            vertices.add(Offset(currentX + numbers[i], currentY + numbers[i + 1]));
+            // Skip control point, only endpoint
             currentX += numbers[i + 2];
             currentY += numbers[i + 3];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'T': // Absolute smooth quadratic bezier
+        case 'T': // Absolute smooth quadratic bezier - endpoint only
           for (int i = 0; i < numbers.length - 1; i += 2) {
             currentX = numbers[i];
             currentY = numbers[i + 1];
@@ -236,7 +238,7 @@ class SvgPathParser {
           }
           break;
           
-        case 't': // Relative smooth quadratic bezier
+        case 't': // Relative smooth quadratic bezier - endpoint only
           for (int i = 0; i < numbers.length - 1; i += 2) {
             currentX += numbers[i];
             currentY += numbers[i + 1];
@@ -244,33 +246,27 @@ class SvgPathParser {
           }
           break;
           
-        case 'A': // Absolute arc
+        case 'A': // Absolute arc - ONLY endpoint, no intermediate points
           for (int i = 0; i < numbers.length - 6; i += 7) {
-            // Add intermediate points along arc for better vertex coverage
-            double endX = numbers[i + 5];
-            double endY = numbers[i + 6];
-            // Add midpoint approximation
-            vertices.add(Offset((currentX + endX) / 2, (currentY + endY) / 2));
-            currentX = endX;
-            currentY = endY;
+            // Only add the actual endpoint of the arc
+            currentX = numbers[i + 5];
+            currentY = numbers[i + 6];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
-        case 'a': // Relative arc
+        case 'a': // Relative arc - ONLY endpoint
           for (int i = 0; i < numbers.length - 6; i += 7) {
-            double endX = currentX + numbers[i + 5];
-            double endY = currentY + numbers[i + 6];
-            vertices.add(Offset((currentX + endX) / 2, (currentY + endY) / 2));
-            currentX = endX;
-            currentY = endY;
+            // Only add endpoint
+            currentX += numbers[i + 5];
+            currentY += numbers[i + 6];
             vertices.add(Offset(currentX, currentY));
           }
           break;
           
         case 'Z':
         case 'z': // Closepath
-          // Add start point as a vertex to close the shape
+          // Only add closing point if it's different from start
           if ((currentX - startX).abs() > 1 || (currentY - startY).abs() > 1) {
             vertices.add(Offset(startX, startY));
           }
@@ -335,6 +331,63 @@ class SvgPathParser {
     }
     
     return _removeDuplicateVertices(vertices, 10.0);
+  }
+  
+  /// Detect path intersections and near-intersections
+  /// This finds points where path segments come close together or cross
+  /// Critical for complex shapes with internal structure like lattices
+  static List<Offset> _detectPathIntersections(Path path) {
+    List<Offset> intersectionPoints = [];
+    
+    // Get all path metrics (segments)
+    final metrics = path.computeMetrics().toList();
+    if (metrics.length < 2) return intersectionPoints;
+    
+    // Sample points densely from each segment
+    List<List<Offset>> segmentSamples = [];
+    for (var metric in metrics) {
+      List<Offset> samples = [];
+      final length = metric.length;
+      // Sample every 5 pixels for good intersection detection
+      final numSamples = (length / 5).ceil().clamp(5, 100);
+      
+      for (int i = 0; i < numSamples; i++) {
+        final distance = (i / (numSamples - 1)) * length;
+        final tangent = metric.getTangentForOffset(distance);
+        if (tangent != null) {
+          samples.add(tangent.position);
+        }
+      }
+      segmentSamples.add(samples);
+    }
+    
+    // Check for intersections between different segments
+    // A point is considered an intersection if segments come within 4 pixels
+    const intersectionThreshold = 4.0;
+    
+    for (int i = 0; i < segmentSamples.length; i++) {
+      for (int j = i + 1; j < segmentSamples.length; j++) {
+        final samples1 = segmentSamples[i];
+        final samples2 = segmentSamples[j];
+        
+        // Check each point in segment1 against points in segment2
+        for (var point1 in samples1) {
+          for (var point2 in samples2) {
+            final distance = (point1 - point2).distance;
+            if (distance < intersectionThreshold) {
+              // Found an intersection - add the midpoint
+              final intersectionPoint = Offset(
+                (point1.dx + point2.dx) / 2,
+                (point1.dy + point2.dy) / 2,
+              );
+              intersectionPoints.add(intersectionPoint);
+            }
+          }
+        }
+      }
+    }
+    
+    return intersectionPoints;
   }
   
   /// Transform and scale path to fit within container dimensions

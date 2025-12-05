@@ -51,22 +51,22 @@ class GamePainter extends CustomPainter {
   void _drawVertices(Canvas canvas) {
     if (vertices.isEmpty) return;
     
-    // Outer ring for vertex
+    // Outer ring for vertex (subtle glow)
     final outerPaint = Paint()
-      ..color = Colors.white.withOpacity(0.5)
+      ..color = Colors.white.withOpacity(0.3)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
+      ..strokeWidth = 1.0;
     
-    // Inner dot for vertex
+    // Inner dot for vertex (small and bright)
     final innerPaint = Paint()
-      ..color = const Color(0xFFFFD700).withOpacity(0.8) // Gold color
+      ..color = const Color(0xFFFFD700).withOpacity(0.9) // Gold color
       ..style = PaintingStyle.fill;
     
     for (final vertex in vertices) {
-      // Draw outer ring
-      canvas.drawCircle(vertex, 6.0, outerPaint);
-      // Draw inner dot
-      canvas.drawCircle(vertex, 3.0, innerPaint);
+      // Draw outer ring (slightly larger)
+      canvas.drawCircle(vertex, 4.0, outerPaint);
+      // Draw inner dot (small but visible)
+      canvas.drawCircle(vertex, 2.5, innerPaint);
     }
   }
   

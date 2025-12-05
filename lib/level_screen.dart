@@ -375,7 +375,7 @@ class _LevelScreenState extends State<LevelScreen> {
                       isGameCompleted: drawController.isGameCompleted,
                       hasError: drawController.hasError,
                       vertices: drawController.vertices,
-                      showVertices: false, // Keep vertices invisible
+                      showVertices: true, // Show vertices as small edge points
                     ),
                   );
                 },

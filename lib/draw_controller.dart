@@ -637,19 +637,28 @@ class DrawController extends ChangeNotifier {
     if (totalPathLength == 0) return;
 
     double drawnLength = 0;
+    double actualTotalLength = 0;
 
+    // Calculate both drawn length and actual total length from path segments
+    // This handles cases where SVGs have overlapping paths
     for (
       int segmentIndex = 0;
       segmentIndex < pathSegments.length;
       segmentIndex++
     ) {
+      final segmentLength = pathSegments[segmentIndex].length;
+      actualTotalLength += segmentLength;
+      
       // Sum up all drawn ranges for this segment
       for (var range in drawnRanges[segmentIndex]) {
         drawnLength += range[1] - range[0];
       }
     }
 
-    progress = (drawnLength / totalPathLength).clamp(0.0, 1.0);
+    // Use actualTotalLength if it differs from totalPathLength
+    // This happens when the SVG has multiple overlapping paths
+    final targetLength = actualTotalLength > 0 ? actualTotalLength : totalPathLength;
+    progress = (drawnLength / targetLength).clamp(0.0, 1.0);
   }
 
   /// Complete the level successfully
