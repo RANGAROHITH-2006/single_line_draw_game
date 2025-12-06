@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:xml/xml.dart';
 import 'package:path_drawing/path_drawing.dart';
 import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 /// SVG Path Parser
 /// Handles loading SVG files and converting path data to Flutter Path objects
@@ -51,11 +52,18 @@ class SvgPathParser {
       }
       
       // Remove duplicate vertices that are too close together
-      allVertices = _removeDuplicateVertices(allVertices, 8.0);
+      // Use larger threshold (25.0) to merge nearby vertices on curves
+      allVertices = _removeDuplicateVertices(allVertices, 25.0);
       
       // Add intersection vertices for complex paths
       allVertices.addAll(_detectPathIntersections(combinedPath));
-      allVertices = _removeDuplicateVertices(allVertices, 8.0);
+      allVertices = _removeDuplicateVertices(allVertices, 25.0);
+      
+      // Apply curvature-aware simplification to reduce vertices on smooth curves
+      allVertices = _simplifyByCurvature(allVertices, angleThreshold: 20.0);
+      
+      // Apply Ramer-Douglas-Peucker algorithm for superior path simplification
+      allVertices = _ramerDouglasPeucker(allVertices, epsilon: 3.0);
       
       // Ensure minimum vertices by sampling the path if needed
       if (allVertices.length < 3) {
@@ -291,6 +299,7 @@ class SvgPathParser {
   }
   
   /// Remove duplicate vertices that are too close together
+  /// Uses adaptive threshold - checks only against recent vertices for better clustering
   static List<Offset> _removeDuplicateVertices(List<Offset> vertices, double threshold) {
     if (vertices.isEmpty) return vertices;
     
@@ -298,8 +307,10 @@ class SvgPathParser {
     
     for (int i = 1; i < vertices.length; i++) {
       bool isDuplicate = false;
-      for (var existing in result) {
-        if ((vertices[i] - existing).distance < threshold) {
+      // Check against recent vertices only (adaptive approach)
+      final checkCount = math.min(result.length, 10);
+      for (int j = result.length - checkCount; j < result.length; j++) {
+        if ((vertices[i] - result[j]).distance < threshold) {
           isDuplicate = true;
           break;
         }
@@ -330,7 +341,7 @@ class SvgPathParser {
       }
     }
     
-    return _removeDuplicateVertices(vertices, 10.0);
+    return _removeDuplicateVertices(vertices, 15.0);
   }
   
   /// Detect path intersections and near-intersections
@@ -348,8 +359,8 @@ class SvgPathParser {
     for (var metric in metrics) {
       List<Offset> samples = [];
       final length = metric.length;
-      // Sample every 5 pixels for good intersection detection
-      final numSamples = (length / 5).ceil().clamp(5, 100);
+      // Sample every 8 pixels for good intersection detection (less aggressive)
+      final numSamples = (length / 8).ceil().clamp(3, 50);
       
       for (int i = 0; i < numSamples; i++) {
         final distance = (i / (numSamples - 1)) * length;
@@ -362,8 +373,9 @@ class SvgPathParser {
     }
     
     // Check for intersections between different segments
-    // A point is considered an intersection if segments come within 4 pixels
-    const intersectionThreshold = 4.0;
+    // A point is considered an intersection if segments come within 5 pixels
+    // Reduced threshold to avoid false positives on smooth curves
+    const intersectionThreshold = 5.0;
     
     for (int i = 0; i < segmentSamples.length; i++) {
       for (int j = i + 1; j < segmentSamples.length; j++) {
@@ -388,6 +400,120 @@ class SvgPathParser {
     }
     
     return intersectionPoints;
+  }
+  
+  /// Simplify vertices based on curvature - removes vertices on smooth curves
+  /// while keeping vertices at sharp corners
+  static List<Offset> _simplifyByCurvature(List<Offset> vertices, {double angleThreshold = 15.0}) {
+    if (vertices.length <= 3) return vertices;
+    
+    List<Offset> simplified = [vertices.first];
+    
+    for (int i = 1; i < vertices.length - 1; i++) {
+      final prev = vertices[i - 1];
+      final current = vertices[i];
+      final next = vertices[i + 1];
+      
+      // Calculate angle at current vertex
+      final angle = _calculateAngle(prev, current, next);
+      
+      // Keep vertex if angle is sharp (less than threshold degrees from straight)
+      // This means we remove vertices that are nearly collinear
+      if (angle < (180 - angleThreshold)) {
+        simplified.add(current);
+      }
+    }
+    
+    // Always keep the last vertex
+    simplified.add(vertices.last);
+    
+    return simplified;
+  }
+  
+  /// Calculate angle at vertex B in degrees (0-180)
+  static double _calculateAngle(Offset a, Offset b, Offset c) {
+    // Vectors from B to A and B to C
+    final ba = a - b;
+    final bc = c - b;
+    
+    // Calculate dot product and magnitudes
+    final dotProduct = ba.dx * bc.dx + ba.dy * bc.dy;
+    final magnitudeBA = ba.distance;
+    final magnitudeBC = bc.distance;
+    
+    if (magnitudeBA == 0 || magnitudeBC == 0) return 180.0;
+    
+    // Calculate angle using dot product
+    final cosAngle = (dotProduct / (magnitudeBA * magnitudeBC)).clamp(-1.0, 1.0);
+    final angleRadians = math.acos(cosAngle);
+    final angleDegrees = angleRadians * 180 / math.pi;
+    
+    return angleDegrees;
+  }
+  
+  /// Ramer-Douglas-Peucker algorithm for path simplification
+  /// This is the gold standard algorithm for reducing vertices while preserving shape
+  static List<Offset> _ramerDouglasPeucker(List<Offset> points, {double epsilon = 2.0}) {
+    if (points.length < 3) return points;
+    
+    // Find the point with maximum distance from line segment
+    double maxDistance = 0.0;
+    int maxIndex = 0;
+    final start = points.first;
+    final end = points.last;
+    
+    for (int i = 1; i < points.length - 1; i++) {
+      final distance = _perpendicularDistance(points[i], start, end);
+      if (distance > maxDistance) {
+        maxDistance = distance;
+        maxIndex = i;
+      }
+    }
+    
+    // If max distance is greater than epsilon, recursively simplify
+    if (maxDistance > epsilon) {
+      // Recursive call on left and right segments
+      final left = _ramerDouglasPeucker(points.sublist(0, maxIndex + 1), epsilon: epsilon);
+      final right = _ramerDouglasPeucker(points.sublist(maxIndex), epsilon: epsilon);
+      
+      // Combine results (remove duplicate middle point)
+      return [...left.sublist(0, left.length - 1), ...right];
+    } else {
+      // All points are close to the line, just keep start and end
+      return [start, end];
+    }
+  }
+  
+  /// Calculate perpendicular distance from point to line segment
+  static double _perpendicularDistance(Offset point, Offset lineStart, Offset lineEnd) {
+    final dx = lineEnd.dx - lineStart.dx;
+    final dy = lineEnd.dy - lineStart.dy;
+    
+    // Calculate the line length squared
+    final lengthSquared = dx * dx + dy * dy;
+    
+    if (lengthSquared == 0) {
+      // Line start and end are the same point
+      return (point - lineStart).distance;
+    }
+    
+    // Calculate the projection parameter
+    final t = ((point.dx - lineStart.dx) * dx + (point.dy - lineStart.dy) * dy) / lengthSquared;
+    
+    // Find the closest point on the line segment
+    final Offset closest;
+    if (t < 0) {
+      closest = lineStart;
+    } else if (t > 1) {
+      closest = lineEnd;
+    } else {
+      closest = Offset(
+        lineStart.dx + t * dx,
+        lineStart.dy + t * dy,
+      );
+    }
+    
+    return (point - closest).distance;
   }
   
   /// Transform and scale path to fit within container dimensions

@@ -26,6 +26,14 @@ class DrawController extends ChangeNotifier {
   // Track the currently active segment index to prevent filling multiple edges at vertices
   int? _activeSegmentIndex;
   double? _lastDistanceOnSegment;
+  
+  // Track initial touch point to determine movement direction
+  Offset? _initialTouchPoint;
+  bool _directionDetermined = false;
+  
+  // Track if we're actively drawing a segment to completion (prevents switching mid-line)
+  bool _isDrawingSegmentToCompletion = false;
+  double? _targetVertexDistance; // The vertex we're drawing towards (0 or length)
 
   // Path metrics
   List<ui.PathMetric> pathSegments = [];
@@ -138,12 +146,15 @@ class DrawController extends ChangeNotifier {
       // Reset active segment tracking
       _activeSegmentIndex = null;
       _lastDistanceOnSegment = null;
+      _initialTouchPoint = localPosition;
+      _directionDetermined = false;
+      _isDrawingSegmentToCompletion = false;
+      _targetVertexDistance = null;
       progress = 0.0;
       errorMessage = null;
 
-      // Mark starting segment as drawn and set it as active
-      // This now fills from the nearest vertex when starting mid-segment
-      _markSegmentAsDrawnAndSetActiveFromVertex(localPosition);
+      // Don't mark any segment yet - wait for movement direction
+      // This prevents filling multiple lines at multi-vertex connections
 
       notifyListeners();
     }
@@ -159,8 +170,20 @@ class DrawController extends ChangeNotifier {
     if (_isPointOnPath(localPosition)) {
       userPath.add(localPosition);
 
+      // If direction not yet determined, determine it now based on movement
+      if (!_directionDetermined && _initialTouchPoint != null && userPath.length > 1) {
+        final movementVector = localPosition - _initialTouchPoint!;
+        final movementDistance = movementVector.distance;
+        
+        // Require clear directional movement before activating (prevent accidental activation at vertices)
+        if (movementDistance > tolerance * 1.0) {
+          _determineAndActivateSegmentByDirection(_initialTouchPoint!, localPosition, movementVector);
+          _directionDetermined = true;
+        }
+      }
+
       // Fill in segments between last and current position
-      if (userPath.length > 1) {
+      if (userPath.length > 1 && _directionDetermined) {
         _fillPathBetweenOnActiveSegment(
           userPath[userPath.length - 2],
           localPosition,
@@ -205,6 +228,10 @@ class DrawController extends ChangeNotifier {
     drawnRanges = List.generate(pathSegments.length, (_) => []);
     _activeSegmentIndex = null;
     _lastDistanceOnSegment = null;
+    _initialTouchPoint = null;
+    _directionDetermined = false;
+    _isDrawingSegmentToCompletion = false;
+    _targetVertexDistance = null;
     onGameReset?.call();
     notifyListeners();
   }
@@ -217,7 +244,7 @@ class DrawController extends ChangeNotifier {
       final length = pathMetric.length;
 
       // Check points along the path with smaller steps for better accuracy
-      for (double distance = 0; distance < length; distance += 1) {
+      for (double distance = 0; distance <= length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
@@ -230,45 +257,140 @@ class DrawController extends ChangeNotifier {
     return false;
   }
 
-  /// Mark a point on the path as drawn and set the active segment
-  /// This is used when starting a new drawing stroke
-  void _markSegmentAsDrawnAndSetActive(Offset point) {
-    // Find the single closest point across ALL segments
-    int? bestSegmentIndex;
-    double? bestDistance;
-    double bestMinDist = double.infinity;
-
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
+  /// Determine which segment to activate based on movement direction at a vertex
+  /// This prevents filling multiple lines when starting from a multi-connection vertex
+  void _determineAndActivateSegmentByDirection(Offset startPoint, Offset currentPoint, Offset movementVector) {
+    // Find all segments that contain or are near the start point
+    List<_SegmentCandidate> candidates = [];
+    
+    for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
-
-      for (double distance = 0; distance <= length; distance += 1) {
-        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-        if (tangent != null) {
-          final double currentDist = (point - tangent.position).distance;
-          if (currentDist <= tolerance && currentDist < bestMinDist) {
-            bestMinDist = currentDist;
-            bestSegmentIndex = segmentIndex;
-            bestDistance = distance;
-          }
+      
+      // Check if start point is near the beginning or end of this segment
+      final startTangent = pathMetric.getTangentForOffset(0);
+      final endTangent = pathMetric.getTangentForOffset(length);
+      
+      double? distanceOnSegment;
+      bool isAtStart = false;
+      bool isAtEnd = false;
+      
+      if (startTangent != null) {
+        final distToStart = (startPoint - startTangent.position).distance;
+        if (distToStart <= tolerance * 0.8) {
+          distanceOnSegment = 0;
+          isAtStart = true;
         }
       }
+      
+      if (endTangent != null && distanceOnSegment == null) {
+        final distToEnd = (startPoint - endTangent.position).distance;
+        if (distToEnd <= tolerance * 0.8) {
+          distanceOnSegment = length;
+          isAtEnd = true;
+        }
+      }
+      
+      // If not at start or end, check if somewhere along the segment
+      if (distanceOnSegment == null) {
+        distanceOnSegment = _findClosestDistanceOnSegment(startPoint, segmentIndex);
+      }
+      
+      if (distanceOnSegment != null) {
+        // Calculate the direction of this segment from the start point
+        Offset segmentDirection;
+        
+        if (isAtStart) {
+          // Direction from start towards the segment (use larger lookahead for clearer direction)
+          final nextTangent = pathMetric.getTangentForOffset((tolerance * 2).clamp(0, length));
+          if (nextTangent != null) {
+            segmentDirection = nextTangent.position - startTangent!.position;
+          } else {
+            continue;
+          }
+        } else if (isAtEnd) {
+          // Direction from end back towards the segment (use larger lookback for clearer direction)
+          final prevTangent = pathMetric.getTangentForOffset((length - tolerance * 2).clamp(0, length));
+          if (prevTangent != null) {
+            segmentDirection = endTangent!.position - prevTangent.position;
+          } else {
+            continue;
+          }
+        } else {
+          // Direction along the segment at this point
+          final tangent = pathMetric.getTangentForOffset(distanceOnSegment);
+          if (tangent != null && tangent.vector.distance > 0) {
+            segmentDirection = tangent.vector;
+          } else {
+            continue;
+          }
+        }
+        
+        // Normalize directions
+        if (segmentDirection.distance > 0) {
+          segmentDirection = segmentDirection / segmentDirection.distance;
+        } else {
+          continue;
+        }
+        
+        Offset normalizedMovement = movementVector.distance > 0 
+            ? movementVector / movementVector.distance 
+            : Offset.zero;
+        
+        // Calculate dot product to measure alignment
+        // Dot product ranges from -1 (opposite) to 1 (same direction)
+        double dotProduct = segmentDirection.dx * normalizedMovement.dx + 
+                           segmentDirection.dy * normalizedMovement.dy;
+        
+        // Also try opposite direction (for segments that go the other way)
+        double dotProductReverse = -dotProduct;
+        double bestDot = dotProduct.abs() > dotProductReverse.abs() ? dotProduct : dotProductReverse;
+        
+        candidates.add(_SegmentCandidate(
+          segmentIndex: segmentIndex,
+          distanceOnSegment: distanceOnSegment,
+          directionAlignment: bestDot,
+          isAtVertex: isAtStart || isAtEnd,
+          vertexEnd: isAtStart ? 0 : (isAtEnd ? length : distanceOnSegment),
+        ));
+      }
     }
-
-    // Set the active segment and mark it as drawn
-    if (bestSegmentIndex != null && bestDistance != null) {
-      _activeSegmentIndex = bestSegmentIndex;
-      _lastDistanceOnSegment = bestDistance;
-
-      final length = pathSegments[bestSegmentIndex].length;
-      // Add a small range around this point
-      double rangeStart = (bestDistance - tolerance / 2).clamp(0, length);
-      double rangeEnd = (bestDistance + tolerance / 2).clamp(0, length);
-      _addRange(bestSegmentIndex, rangeStart, rangeEnd);
+    
+    // Select the segment that best aligns with the movement direction
+    if (candidates.isNotEmpty) {
+      // Filter out segments with poor alignment (less than 0.5) - be strict to avoid multi-segment activation
+      final filteredCandidates = candidates.where((c) => c.directionAlignment > 0.5).toList();
+      
+      // Use filtered list if not empty, otherwise use all candidates
+      final finalCandidates = filteredCandidates.isNotEmpty ? filteredCandidates : candidates;
+      
+      // Sort by direction alignment (highest first)
+      finalCandidates.sort((a, b) => b.directionAlignment.compareTo(a.directionAlignment));
+      
+      final best = finalCandidates.first;
+      _activeSegmentIndex = best.segmentIndex;
+      _lastDistanceOnSegment = best.distanceOnSegment;
+      _isDrawingSegmentToCompletion = true;
+      
+      final pathMetric = pathSegments[best.segmentIndex];
+      final length = pathMetric.length;
+      
+      // If starting at a vertex, set up for drawing but don't fill yet
+      if (best.isAtVertex) {
+        // Determine which vertex we started from and set target to opposite end
+        double startVertex = best.vertexEnd < 0.5 ? 0.0 : length;
+        _targetVertexDistance = startVertex < 0.5 ? length : 0.0;
+        _lastDistanceOnSegment = startVertex;
+        
+        // Don't add any range yet - wait for actual movement to prevent auto-fill
+      } else {
+        // Starting mid-segment, fill from nearest vertex
+        _markSegmentAsDrawnAndSetActiveFromVertex(startPoint);
+        // Target is the opposite end from where we started
+        if (_lastDistanceOnSegment != null) {
+          _targetVertexDistance = _lastDistanceOnSegment! < length / 2 ? length : 0.0;
+        }
+      }
     }
   }
   
@@ -284,7 +406,7 @@ class DrawController extends ChangeNotifier {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
 
-      for (double distance = 0; distance <= length; distance += 1) {
+      for (double distance = 0; distance <= length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDist = (point - tangent.position).distance;
@@ -344,12 +466,20 @@ class DrawController extends ChangeNotifier {
     }
 
     // Fill from nearest vertex (on same path) to touch point
-    double rangeStart = bestDistance < nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
-    double rangeEnd = bestDistance > nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
+    // Use exact vertex position to avoid gaps
+    double exactVertexPos = nearestVertexPathDist;
+    if (nearestVertexPathDist < tolerance) {
+      exactVertexPos = 0.0; // Snap to start
+    } else if (nearestVertexPathDist > length - tolerance) {
+      exactVertexPos = length; // Snap to end
+    }
     
-    // Extend range slightly for tolerance
-    rangeStart = (rangeStart - tolerance / 2).clamp(0.0, length);
-    rangeEnd = (rangeEnd + tolerance / 2).clamp(0.0, length);
+    double rangeStart = bestDistance < exactVertexPos ? bestDistance : exactVertexPos;
+    double rangeEnd = bestDistance > exactVertexPos ? bestDistance : exactVertexPos;
+    
+    // Don't extend range - use exact positions to prevent gaps
+    rangeStart = rangeStart.clamp(0.0, length);
+    rangeEnd = rangeEnd.clamp(0.0, length);
     
     _addRange(bestSegmentIndex, rangeStart, rangeEnd);
   }
@@ -362,7 +492,7 @@ class DrawController extends ChangeNotifier {
     double? closestDistance;
     double minDist = double.infinity;
 
-    for (double distance = 0; distance <= length; distance += 1) {
+    for (double distance = 0; distance <= length; distance += 0.5) {
       final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
       if (tangent != null) {
         final double currentDist = (point - tangent.position).distance;
@@ -386,8 +516,8 @@ class DrawController extends ChangeNotifier {
     List<List<double>> newRanges = [];
 
     for (var range in ranges) {
-      // Check if ranges overlap or are adjacent (within 2 pixels)
-      if (start <= range[1] + 2 && end >= range[0] - 2) {
+      // Check if ranges overlap or are adjacent (within 0.5 pixels)
+      if (start <= range[1] + 0.5 && end >= range[0] - 0.5) {
         // Merge ranges
         start = start < range[0] ? start : range[0];
         end = end > range[1] ? end : range[1];
@@ -404,7 +534,7 @@ class DrawController extends ChangeNotifier {
     // Merge any remaining overlapping ranges after sorting
     List<List<double>> finalRanges = [];
     for (var range in newRanges) {
-      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 2) {
+      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 0.5) {
         finalRanges.add(range);
       } else {
         finalRanges.last[1] =
@@ -426,188 +556,78 @@ class DrawController extends ChangeNotifier {
       return;
     }
 
-    // First, check if we can continue on the current active segment
+    // STRICT MODE: Once a segment is active, user MUST complete it to a vertex before switching
     if (_activeSegmentIndex != null) {
-      double? endDistOnActive = _findClosestDistanceOnSegment(
-        endPoint,
-        _activeSegmentIndex!,
-      );
-
-      if (endDistOnActive != null && _lastDistanceOnSegment != null) {
-        // Calculate path distance on the active segment
-        double pathDistance = (endDistOnActive - _lastDistanceOnSegment!).abs();
-
-        // If the path distance is reasonable, continue on the same segment
-        if (pathDistance <= screenDistance * 2 + tolerance * 2) {
-          final length = pathSegments[_activeSegmentIndex!].length;
-          double rangeStart =
-              (_lastDistanceOnSegment! < endDistOnActive
-                  ? _lastDistanceOnSegment!
-                  : endDistOnActive);
-          double rangeEnd =
-              (_lastDistanceOnSegment! > endDistOnActive
-                  ? _lastDistanceOnSegment!
-                  : endDistOnActive);
-          _addRange(
-            _activeSegmentIndex!,
-            rangeStart.clamp(0, length),
-            rangeEnd.clamp(0, length),
-          );
-          _lastDistanceOnSegment = endDistOnActive;
+      // Check if current point is on the active segment (use lenient tolerance)
+      double? endDistOnActive = _findClosestDistanceOnSegmentLenient(endPoint, _activeSegmentIndex!);
+      
+      if (endDistOnActive == null) {
+        // User went off the active segment
+        // Check completion percentage
+        double completionPercentage = _getActiveSegmentCompletionPercentage();
+        
+        if (completionPercentage < 0.80) {
+          // Less than 80% complete - don't allow switching
+          _stopDrawingWithError("Complete at least 80% of the current line first!");
           return;
         }
+        
+        // >= 80% complete - auto-complete the remaining part
+        _autoCompleteActiveSegmentToVertex();
+        
+        // Reset for next line
+        _activeSegmentIndex = null;
+        _lastDistanceOnSegment = null;
+        _directionDetermined = false;
+        _initialTouchPoint = endPoint;
+        return;
       }
 
-      // Check if we've reached the end of the current segment and need to transition
-      // to a connected segment
-      _tryTransitionToConnectedSegment(endPoint, screenDistance);
-    } else {
-      // No active segment set, find the best one
-      _markSegmentAsDrawnAndSetActive(endPoint);
-    }
-  }
-
-  /// Try to transition from the current active segment to a connected segment
-  /// This handles cases where the user traces past a vertex to a new edge
-  void _tryTransitionToConnectedSegment(Offset point, double screenDistance) {
-    if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) return;
-
-    final activeMetric = pathSegments[_activeSegmentIndex!];
-    final activeLength = activeMetric.length;
-
-    // Check if we're near the start or end of the active segment
-    bool nearStart = _lastDistanceOnSegment! < tolerance * 2;
-    bool nearEnd = _lastDistanceOnSegment! > activeLength - tolerance * 2;
-
-    if (!nearStart && !nearEnd) {
-      // We're in the middle of the segment but the point isn't on it
-      // This shouldn't normally happen if _isPointOnPath returned true
-      // Try to find the closest segment
-      _markSegmentAsDrawnAndSetActive(point);
-      return;
-    }
-
-    // Get the endpoint position of the current segment
-    Offset? endpointPos;
-    if (nearEnd) {
-      final tangent = activeMetric.getTangentForOffset(activeLength);
-      endpointPos = tangent?.position;
-    } else if (nearStart) {
-      final tangent = activeMetric.getTangentForOffset(0);
-      endpointPos = tangent?.position;
-    }
-
-    if (endpointPos == null) return;
-
-    // Find segments that connect at this vertex (their start or end is near this endpoint)
-    int? bestNewSegment;
-    double? bestDistanceOnNewSegment;
-    double bestMinDist = double.infinity;
-
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
-      if (segmentIndex == _activeSegmentIndex) continue;
-
-      final pathMetric = pathSegments[segmentIndex];
-      final length = pathMetric.length;
-
-      // Check if this segment connects to our endpoint
-      final startTangent = pathMetric.getTangentForOffset(0);
-      final endTangent = pathMetric.getTangentForOffset(length);
-
-      bool connectsAtStart =
-          startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 2;
-      bool connectsAtEnd =
-          endTangent != null &&
-          (endTangent.position - endpointPos).distance < tolerance * 2;
-
-      if (!connectsAtStart && !connectsAtEnd) continue;
-
-      // This segment connects - check if the current point is on it
-      double? distOnSegment = _findClosestDistanceOnSegment(
-        point,
-        segmentIndex,
-      );
-      if (distOnSegment != null) {
-        // Verify the point is being traced from the connection point
-        // (not jumping to the middle of the segment)
-        double expectedStartDist = connectsAtStart ? 0 : length;
-        double distFromConnection = (distOnSegment - expectedStartDist).abs();
-
-        // Only accept if we're tracing from the connection point
-        if (distFromConnection < tolerance * 3 + screenDistance * 2) {
-          final currentDist = _getDistanceFromPoint(
-            point,
-            segmentIndex,
-            distOnSegment,
-          );
-          if (currentDist < bestMinDist) {
-            bestMinDist = currentDist;
-            bestNewSegment = segmentIndex;
-            bestDistanceOnNewSegment = distOnSegment;
+      // User is still on the active segment - continue drawing
+      if (_lastDistanceOnSegment != null) {
+        // Fill from last to current position on this segment
+        final length = pathSegments[_activeSegmentIndex!].length;
+        double rangeStart =
+            (_lastDistanceOnSegment! < endDistOnActive
+                ? _lastDistanceOnSegment!
+                : endDistOnActive);
+        double rangeEnd =
+            (_lastDistanceOnSegment! > endDistOnActive
+                ? _lastDistanceOnSegment!
+                : endDistOnActive);
+        _addRange(
+          _activeSegmentIndex!,
+          rangeStart.clamp(0, length),
+          rangeEnd.clamp(0, length),
+        );
+        _lastDistanceOnSegment = endDistOnActive;
+        
+        // Check if we've reached near a vertex - auto-complete the line
+        bool nearStart = endDistOnActive < tolerance * 2;
+        bool nearEnd = endDistOnActive > length - tolerance * 2;
+        
+        if (nearStart || nearEnd) {
+          // Auto-complete to the exact vertex
+          if (nearStart) {
+            _addRange(_activeSegmentIndex!, 0.0, endDistOnActive);
+            _lastDistanceOnSegment = 0.0;
+          } else if (nearEnd) {
+            _addRange(_activeSegmentIndex!, endDistOnActive, length);
+            _lastDistanceOnSegment = length;
           }
+          
+          // Mark segment as complete and reset so user must start next line explicitly
+          _activeSegmentIndex = null;
+          _lastDistanceOnSegment = null;
+          _directionDetermined = false;
+          _initialTouchPoint = endPoint;
         }
+        
+        return;
       }
     }
-
-    // Transition to the new segment if found
-    if (bestNewSegment != null && bestDistanceOnNewSegment != null) {
-      // First, fill to the end of the current segment
-      final length = pathSegments[_activeSegmentIndex!].length;
-      if (nearEnd) {
-        _addRange(_activeSegmentIndex!, _lastDistanceOnSegment!, length);
-      } else if (nearStart) {
-        _addRange(_activeSegmentIndex!, 0, _lastDistanceOnSegment!);
-      }
-
-      // Now switch to the new segment
-      _activeSegmentIndex = bestNewSegment;
-
-      // Determine which end of the new segment we're starting from
-      final newMetric = pathSegments[bestNewSegment];
-      final newLength = newMetric.length;
-      final startTangent = newMetric.getTangentForOffset(0);
-
-      bool startsFromBeginning =
-          startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 2;
-
-      // Add range from the connection point to current position
-      if (startsFromBeginning) {
-        _addRange(
-          bestNewSegment,
-          0,
-          bestDistanceOnNewSegment.clamp(0, newLength),
-        );
-      } else {
-        _addRange(
-          bestNewSegment,
-          bestDistanceOnNewSegment.clamp(0, newLength),
-          newLength,
-        );
-      }
-
-      _lastDistanceOnSegment = bestDistanceOnNewSegment;
-    } else {
-      // Couldn't find a connected segment, try to find any segment the point is on
-      _markSegmentAsDrawnAndSetActive(point);
-    }
-  }
-
-  /// Helper to get screen distance from a point to a specific position on a segment
-  double _getDistanceFromPoint(
-    Offset point,
-    int segmentIndex,
-    double distanceOnPath,
-  ) {
-    final pathMetric = pathSegments[segmentIndex];
-    final tangent = pathMetric.getTangentForOffset(distanceOnPath);
-    if (tangent == null) return double.infinity;
-    return (point - tangent.position).distance;
+    
+    // If no active segment, do nothing (direction determination will set it)
   }
 
   /// Find the closest distance along a segment for a given point
@@ -618,7 +638,7 @@ class DrawController extends ChangeNotifier {
     double? closestDistance;
     double minDist = double.infinity;
 
-    for (double distance = 0; distance <= length; distance += 1) {
+    for (double distance = 0; distance <= length; distance += 0.5) {
       final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
       if (tangent != null) {
         final double currentDist = (point - tangent.position).distance;
@@ -630,6 +650,89 @@ class DrawController extends ChangeNotifier {
     }
 
     return closestDistance;
+  }
+
+  /// Find the closest distance along a segment with lenient tolerance (for active segment)
+  /// Uses 2x tolerance to ensure continuous filling even if finger is slightly off
+  double? _findClosestDistanceOnSegmentLenient(Offset point, int segmentIndex) {
+    final pathMetric = pathSegments[segmentIndex];
+    final length = pathMetric.length;
+
+    double? closestDistance;
+    double minDist = double.infinity;
+
+    for (double distance = 0; distance <= length; distance += 0.5) {
+      final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
+      if (tangent != null) {
+        final double currentDist = (point - tangent.position).distance;
+        if (currentDist <= tolerance * 2 && currentDist < minDist) {
+          minDist = currentDist;
+          closestDistance = distance;
+        }
+      }
+    }
+
+    return closestDistance;
+  }
+
+  /// Check if the active segment is fully drawn to at least one vertex
+  bool _isActiveSegmentCompleteToVertex() {
+    if (_activeSegmentIndex == null || drawnRanges.isEmpty) return false;
+    
+    final ranges = drawnRanges[_activeSegmentIndex!];
+    if (ranges.isEmpty) return false;
+    
+    final length = pathSegments[_activeSegmentIndex!].length;
+    
+    // Check if any range reaches either vertex (0 or length)
+    for (var range in ranges) {
+      bool reachesStart = range[0] <= 1.0;
+      bool reachesEnd = range[1] >= length - 1.0;
+      
+      if (reachesStart || reachesEnd) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+  
+  /// Get the completion percentage of the active segment (0.0 to 1.0)
+  double _getActiveSegmentCompletionPercentage() {
+    if (_activeSegmentIndex == null || _activeSegmentIndex! >= drawnRanges.length) return 0.0;
+    
+    final ranges = drawnRanges[_activeSegmentIndex!];
+    if (ranges.isEmpty) return 0.0;
+    
+    final length = pathSegments[_activeSegmentIndex!].length;
+    if (length == 0) return 0.0;
+    
+    // Sum up all drawn ranges for this segment
+    double drawnLength = 0.0;
+    for (var range in ranges) {
+      drawnLength += range[1] - range[0];
+    }
+    
+    return (drawnLength / length).clamp(0.0, 1.0);
+  }
+  
+  /// Auto-complete the remaining part of active segment to nearest vertex
+  void _autoCompleteActiveSegmentToVertex() {
+    if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) return;
+    
+    final length = pathSegments[_activeSegmentIndex!].length;
+    final currentPos = _lastDistanceOnSegment!;
+    
+    // Determine which vertex is closer
+    bool closerToStart = currentPos < length / 2;
+    
+    if (closerToStart) {
+      // Complete to start (0)
+      _addRange(_activeSegmentIndex!, 0.0, currentPos);
+    } else {
+      // Complete to end (length)
+      _addRange(_activeSegmentIndex!, currentPos, length);
+    }
   }
 
   /// Update progress based on drawn ranges (continuous line tracking)
@@ -694,4 +797,21 @@ class DrawController extends ChangeNotifier {
 
   /// Get drawn ranges for painter (for visual rendering)
   List<List<List<double>>> get getDrawnRanges => drawnRanges;
+}
+
+/// Helper class to store segment candidate information
+class _SegmentCandidate {
+  final int segmentIndex;
+  final double distanceOnSegment;
+  final double directionAlignment; // Dot product: -1 to 1
+  final bool isAtVertex;
+  final double vertexEnd;
+  
+  _SegmentCandidate({
+    required this.segmentIndex,
+    required this.distanceOnSegment,
+    required this.directionAlignment,
+    required this.isAtVertex,
+    required this.vertexEnd,
+  });
 }
