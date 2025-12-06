@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
 import 'package:singlelinedraw/svg_path_parser.dart';
+import 'package:singlelinedraw/models/path_graph.dart';
 
 /// Draw Controller
 /// Manages the drawing interaction, path validation, and game state
 /// Handles gesture recognition, progress tracking, and completion detection
-/// Now with vertex-aware segment drawing for better path tracing
+/// Now with edge-based graph system where vertices can belong to multiple edges
 class DrawController extends ChangeNotifier {
   // Game state
   bool isDrawing = false;
@@ -62,13 +63,29 @@ class DrawController extends ChangeNotifier {
   }
   
   /// Initialize with vertex information for better segment tracking
+  /// Now builds a PathGraph for edge-based tracking where vertices can connect multiple edges
   void initializeWithVertices(Path transformedPath, List<Offset> vertices) {
     svgPath = transformedPath;
     pathSegments = SvgPathParser.getPathSegments(transformedPath);
     totalPathLength = SvgPathParser.getPathLength(transformedPath);
     transformedVertices = vertices;
     
-    // Extract vertex-based segments
+    // Build path graph from vertices - this creates an edge-based representation
+    // where each edge is a line/curve segment between two vertices
+    // Vertices at the same position are automatically merged
+    final pathGraph = PathGraph.buildFromVertices(
+      transformedPath,
+      vertices,
+      vertexMergeThreshold: 15.0,
+    );
+    
+    // For debugging: log the graph structure
+    debugPrint('PathGraph built: ${pathGraph.vertices.length} vertices, ${pathGraph.edges.length} edges');
+    for (var vertex in pathGraph.vertices) {
+      debugPrint('  Vertex ${vertex.id}: ${vertex.connectedEdgeIds.length} edges connected');
+    }
+    
+    // Extract vertex-based segments (legacy support)
     vertexSegments = SvgPathParser.extractSegmentsWithVertices(transformedPath, vertices);
     
     // If not enough segments found, ensure minimum by sampling
