@@ -63,7 +63,7 @@ class LevelsData {
       isUnlocked: true,
     ),
     LevelData(
-      levelNumber: 8,
+      levelNumber: 9,
       svgPath: 'assets/svg/Level9.svg', // Using home.svg as fallback for level 7
       isCompleted: false,
       isUnlocked: true,
