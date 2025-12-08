@@ -16,7 +16,8 @@ class DrawController extends ChangeNotifier {
   // Drawing data
   List<Offset> userPath = [];
   Path? svgPath;
-  double tolerance = 16.0; // Hit detection tolerance in pixels
+  double tolerance =
+      18.0; // Hit detection tolerance in pixels (balanced for smooth drawing)
 
   // Continuous range-based tracking (instead of discrete dots)
   // Each segment has a list of drawn ranges [start, end] along its length
@@ -30,7 +31,7 @@ class DrawController extends ChangeNotifier {
   // Path metrics
   List<ui.PathMetric> pathSegments = [];
   double totalPathLength = 0.0;
-  
+
   // Vertex-based segments
   List<PathSegmentInfo> vertexSegments = [];
   List<Offset> transformedVertices = [];
@@ -52,17 +53,20 @@ class DrawController extends ChangeNotifier {
 
     reset();
   }
-  
+
   /// Initialize with vertex information for better segment tracking
   void initializeWithVertices(Path transformedPath, List<Offset> vertices) {
     svgPath = transformedPath;
     pathSegments = SvgPathParser.getPathSegments(transformedPath);
     totalPathLength = SvgPathParser.getPathLength(transformedPath);
     transformedVertices = vertices;
-    
+
     // Extract vertex-based segments
-    vertexSegments = SvgPathParser.extractSegmentsWithVertices(transformedPath, vertices);
-    
+    vertexSegments = SvgPathParser.extractSegmentsWithVertices(
+      transformedPath,
+      vertices,
+    );
+
     // If not enough segments found, ensure minimum by sampling
     if (vertexSegments.isEmpty && pathSegments.isNotEmpty) {
       // Fall back to simple segment extraction
@@ -74,30 +78,30 @@ class DrawController extends ChangeNotifier {
 
     reset();
   }
-  
+
   /// Create default vertex segments by sampling the path
   void _createDefaultVertexSegments() {
     vertexSegments = [];
     transformedVertices = [];
-    
+
     for (int i = 0; i < pathSegments.length; i++) {
       final metric = pathSegments[i];
       final length = metric.length;
-      
+
       // Sample at least 5 points along each path metric
       final numPoints = (length / 50).ceil().clamp(5, 20);
       final step = length / numPoints;
-      
+
       List<double> sampleDistances = [];
       for (int j = 0; j <= numPoints; j++) {
         sampleDistances.add((j * step).clamp(0.0, length));
       }
-      
+
       // Create segments between sample points
       for (int j = 0; j < sampleDistances.length - 1; j++) {
         final startTangent = metric.getTangentForOffset(sampleDistances[j]);
         final endTangent = metric.getTangentForOffset(sampleDistances[j + 1]);
-        
+
         if (startTangent != null && endTangent != null) {
           if (j == 0 || !transformedVertices.contains(startTangent.position)) {
             transformedVertices.add(startTangent.position);
@@ -105,23 +109,26 @@ class DrawController extends ChangeNotifier {
           if (!transformedVertices.contains(endTangent.position)) {
             transformedVertices.add(endTangent.position);
           }
-          
-          vertexSegments.add(PathSegmentInfo(
-            pathMetricIndex: i,
-            startVertex: startTangent.position,
-            endVertex: endTangent.position,
-            startDistance: sampleDistances[j],
-            endDistance: sampleDistances[j + 1],
-            startVertexIndex: transformedVertices.length - 2,
-            endVertexIndex: transformedVertices.length - 1,
-          ));
+
+          vertexSegments.add(
+            PathSegmentInfo(
+              pathMetricIndex: i,
+              startVertex: startTangent.position,
+              endVertex: endTangent.position,
+              startDistance: sampleDistances[j],
+              endDistance: sampleDistances[j + 1],
+              startVertexIndex: transformedVertices.length - 2,
+              endVertexIndex: transformedVertices.length - 1,
+            ),
+          );
         }
       }
     }
   }
-  
+
   /// Get vertices for display
   List<Offset> get vertices => transformedVertices;
+
   /// Handle pan start - begin drawing
   void onPanStart(DragStartDetails details) {
     if (isGameCompleted) return;
@@ -217,7 +224,7 @@ class DrawController extends ChangeNotifier {
       final length = pathMetric.length;
 
       // Check points along the path with smaller steps for better accuracy
-      for (double distance = 0; distance < length; distance += 1) {
+      for (double distance = 0; distance < length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
@@ -246,7 +253,7 @@ class DrawController extends ChangeNotifier {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
 
-      for (double distance = 0; distance <= length; distance += 1) {
+      for (double distance = 0; distance <= length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDist = (point - tangent.position).distance;
@@ -271,7 +278,7 @@ class DrawController extends ChangeNotifier {
       _addRange(bestSegmentIndex, rangeStart, rangeEnd);
     }
   }
-  
+
   /// Mark a point on the path as drawn and set the active segment
   /// When starting from middle of a segment, fills from the nearest vertex ON THE SAME PATH
   void _markSegmentAsDrawnAndSetActiveFromVertex(Offset point) {
@@ -280,11 +287,15 @@ class DrawController extends ChangeNotifier {
     double? bestDistance;
     double bestMinDist = double.infinity;
 
-    for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
+    for (
+      int segmentIndex = 0;
+      segmentIndex < pathSegments.length;
+      segmentIndex++
+    ) {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
 
-      for (double distance = 0; distance <= length; distance += 1) {
+      for (double distance = 0; distance <= length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDist = (point - tangent.position).distance;
@@ -333,7 +344,11 @@ class DrawController extends ChangeNotifier {
     // Check intermediate vertices ONLY if they are on THIS path segment
     // Use a strict tolerance to ensure vertex is actually on this path
     for (final vertex in transformedVertices) {
-      final vertexDistOnPath = _findClosestDistanceOnSegmentStrict(vertex, bestSegmentIndex, 8.0);
+      final vertexDistOnPath = _findClosestDistanceOnSegmentStrict(
+        vertex,
+        bestSegmentIndex,
+        8.0,
+      );
       if (vertexDistOnPath != null) {
         final distToVertex = (point - vertex).distance;
         if (distToVertex < nearestVertexScreenDist) {
@@ -344,25 +359,35 @@ class DrawController extends ChangeNotifier {
     }
 
     // Fill from nearest vertex (on same path) to touch point
-    double rangeStart = bestDistance < nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
-    double rangeEnd = bestDistance > nearestVertexPathDist ? bestDistance : nearestVertexPathDist;
-    
+    double rangeStart =
+        bestDistance < nearestVertexPathDist
+            ? bestDistance
+            : nearestVertexPathDist;
+    double rangeEnd =
+        bestDistance > nearestVertexPathDist
+            ? bestDistance
+            : nearestVertexPathDist;
+
     // Extend range slightly for tolerance
     rangeStart = (rangeStart - tolerance / 2).clamp(0.0, length);
     rangeEnd = (rangeEnd + tolerance / 2).clamp(0.0, length);
-    
+
     _addRange(bestSegmentIndex, rangeStart, rangeEnd);
   }
-  
+
   /// Find distance on segment with strict tolerance (for vertex matching on same path)
-  double? _findClosestDistanceOnSegmentStrict(Offset point, int segmentIndex, double strictTolerance) {
+  double? _findClosestDistanceOnSegmentStrict(
+    Offset point,
+    int segmentIndex,
+    double strictTolerance,
+  ) {
     final pathMetric = pathSegments[segmentIndex];
     final length = pathMetric.length;
 
     double? closestDistance;
     double minDist = double.infinity;
 
-    for (double distance = 0; distance <= length; distance += 1) {
+    for (double distance = 0; distance <= length; distance += 0.5) {
       final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
       if (tangent != null) {
         final double currentDist = (point - tangent.position).distance;
@@ -386,8 +411,8 @@ class DrawController extends ChangeNotifier {
     List<List<double>> newRanges = [];
 
     for (var range in ranges) {
-      // Check if ranges overlap or are adjacent (within 2 pixels)
-      if (start <= range[1] + 2 && end >= range[0] - 2) {
+      // Check if ranges overlap or are adjacent (within 3 pixels for smoother drawing)
+      if (start <= range[1] + 3 && end >= range[0] - 3) {
         // Merge ranges
         start = start < range[0] ? start : range[0];
         end = end > range[1] ? end : range[1];
@@ -404,7 +429,7 @@ class DrawController extends ChangeNotifier {
     // Merge any remaining overlapping ranges after sorting
     List<List<double>> finalRanges = [];
     for (var range in newRanges) {
-      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 2) {
+      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 3) {
         finalRanges.add(range);
       } else {
         finalRanges.last[1] =
@@ -618,7 +643,7 @@ class DrawController extends ChangeNotifier {
     double? closestDistance;
     double minDist = double.infinity;
 
-    for (double distance = 0; distance <= length; distance += 1) {
+    for (double distance = 0; distance <= length; distance += 0.5) {
       final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
       if (tangent != null) {
         final double currentDist = (point - tangent.position).distance;
@@ -648,7 +673,7 @@ class DrawController extends ChangeNotifier {
     ) {
       final segmentLength = pathSegments[segmentIndex].length;
       actualTotalLength += segmentLength;
-      
+
       // Sum up all drawn ranges for this segment
       for (var range in drawnRanges[segmentIndex]) {
         drawnLength += range[1] - range[0];
@@ -657,7 +682,8 @@ class DrawController extends ChangeNotifier {
 
     // Use actualTotalLength if it differs from totalPathLength
     // This happens when the SVG has multiple overlapping paths
-    final targetLength = actualTotalLength > 0 ? actualTotalLength : totalPathLength;
+    final targetLength =
+        actualTotalLength > 0 ? actualTotalLength : totalPathLength;
     progress = (drawnLength / targetLength).clamp(0.0, 1.0);
   }
 
