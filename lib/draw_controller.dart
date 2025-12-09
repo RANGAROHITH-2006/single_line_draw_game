@@ -138,8 +138,8 @@ class DrawController extends ChangeNotifier {
 
     final localPosition = details.localPosition;
 
-    // Check if starting position is on or near the path
-    if (_isPointOnPath(localPosition)) {
+    // Check if starting position is on a VERTEX only (not middle of line)
+    if (_isPointOnVertex(localPosition)) {
       isDrawing = true;
       userPath.clear();
       userPath.add(localPosition);
@@ -152,7 +152,6 @@ class DrawController extends ChangeNotifier {
       errorMessage = null;
 
       // Mark starting segment as drawn and set it as active
-      // This now fills from the nearest vertex when starting mid-segment
       _markSegmentAsDrawnAndSetActiveFromVertex(localPosition);
 
       notifyListeners();
@@ -218,6 +217,20 @@ class DrawController extends ChangeNotifier {
     _drawnSegments.clear();
     onGameReset?.call();
     notifyListeners();
+  }
+
+  /// Check if a point is on a vertex (only endpoints of segments)
+  bool _isPointOnVertex(Offset point) {
+    if (transformedVertices.isEmpty) return false;
+
+    // Check if point is near any vertex with stricter tolerance
+    for (final vertex in transformedVertices) {
+      final distance = (point - vertex).distance;
+      if (distance <= tolerance) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Check if a point is on or near the SVG path
@@ -306,7 +319,7 @@ class DrawController extends ChangeNotifier {
   }
 
   /// Mark a point on the path as drawn and set the active segment
-  /// When starting from middle of a segment, fills from the nearest vertex ON THE SAME PATH
+  /// No auto-fill from vertices - only marks the touch point on the path
   void _markSegmentAsDrawnAndSetActiveFromVertex(Offset point) {
     // Find the closest point on the path
     int? bestSegmentIndex;
@@ -343,103 +356,10 @@ class DrawController extends ChangeNotifier {
     final pathMetric = pathSegments[bestSegmentIndex];
     final length = pathMetric.length;
 
-    // Find the nearest vertex ON THIS SAME PATH SEGMENT only
-    // This ensures we don't fill towards vertices on other paths
-    double nearestVertexPathDist = 0;
-    double nearestVertexScreenDist = double.infinity;
-
-    // Always consider start of this path segment as a vertex
-    final startTangent = pathMetric.getTangentForOffset(0);
-    if (startTangent != null) {
-      final distToStart = (point - startTangent.position).distance;
-      if (distToStart < nearestVertexScreenDist) {
-        nearestVertexScreenDist = distToStart;
-        nearestVertexPathDist = 0;
-      }
-    }
-
-    // Always consider end of this path segment as a vertex
-    final endTangent = pathMetric.getTangentForOffset(length);
-    if (endTangent != null) {
-      final distToEnd = (point - endTangent.position).distance;
-      if (distToEnd < nearestVertexScreenDist) {
-        nearestVertexScreenDist = distToEnd;
-        nearestVertexPathDist = length;
-      }
-    }
-
-    // Check intermediate vertices ONLY if they are on THIS path segment
-    // Use a strict tolerance to ensure vertex is actually on this path
-    for (final vertex in transformedVertices) {
-      final vertexDistOnPath = _findClosestDistanceOnSegmentStrict(
-        vertex,
-        bestSegmentIndex,
-        8.0,
-      );
-      if (vertexDistOnPath != null) {
-        final distToVertex = (point - vertex).distance;
-        if (distToVertex < nearestVertexScreenDist) {
-          nearestVertexScreenDist = distToVertex;
-          nearestVertexPathDist = vertexDistOnPath;
-        }
-      }
-    }
-
-    // Fill from nearest vertex (on same path) to touch point
-    // BUT only if the touch point is reasonably far from the vertex
-    // This prevents accidental auto-fill when just shaking near a vertex
-    double distanceFromVertex = (bestDistance - nearestVertexPathDist).abs();
-
-    // Only auto-fill if moved at least 30 pixels along the path from the vertex
-    if (distanceFromVertex < 30.0) {
-      // Just mark a small range around the touch point, don't auto-fill from vertex
-      double rangeStart = (bestDistance - tolerance / 2).clamp(0.0, length);
-      double rangeEnd = (bestDistance + tolerance / 2).clamp(0.0, length);
-      _addRange(bestSegmentIndex, rangeStart, rangeEnd);
-      return;
-    }
-
-    double rangeStart =
-        bestDistance < nearestVertexPathDist
-            ? bestDistance
-            : nearestVertexPathDist;
-    double rangeEnd =
-        bestDistance > nearestVertexPathDist
-            ? bestDistance
-            : nearestVertexPathDist;
-
-    // Extend range slightly for tolerance
-    rangeStart = (rangeStart - tolerance / 2).clamp(0.0, length);
-    rangeEnd = (rangeEnd + tolerance / 2).clamp(0.0, length);
-
+    // Just mark a small range around the touch point, no auto-fill from vertices
+    double rangeStart = (bestDistance - tolerance / 2).clamp(0.0, length);
+    double rangeEnd = (bestDistance + tolerance / 2).clamp(0.0, length);
     _addRange(bestSegmentIndex, rangeStart, rangeEnd);
-  }
-
-  /// Find distance on segment with strict tolerance (for vertex matching on same path)
-  double? _findClosestDistanceOnSegmentStrict(
-    Offset point,
-    int segmentIndex,
-    double strictTolerance,
-  ) {
-    final pathMetric = pathSegments[segmentIndex];
-    final length = pathMetric.length;
-
-    double? closestDistance;
-    double minDist = double.infinity;
-
-    // Use larger steps (2.0) for better performance
-    for (double distance = 0; distance <= length; distance += 2.0) {
-      final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-      if (tangent != null) {
-        final double currentDist = (point - tangent.position).distance;
-        if (currentDist <= strictTolerance && currentDist < minDist) {
-          minDist = currentDist;
-          closestDistance = distance;
-        }
-      }
-    }
-
-    return closestDistance;
   }
 
   /// Add a range to a segment, merging with existing overlapping ranges
