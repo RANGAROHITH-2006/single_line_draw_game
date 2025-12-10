@@ -68,6 +68,18 @@ class LevelsData {
       isCompleted: false,
       isUnlocked: true,
     ),
+    LevelData(
+      levelNumber: 10,
+      svgPath: 'assets/svg/Level10.svg', // Using home.svg as fallback for level 7
+      isCompleted: false,
+      isUnlocked: true,
+    ),
+    LevelData(
+      levelNumber: 11,
+      svgPath: 'assets/svg/Level11.svg', // Using home.svg as fallback for level 7
+      isCompleted: false,
+      isUnlocked: true,
+    ),
   ];
 
   static LevelData? getLevelData(int levelNumber) {

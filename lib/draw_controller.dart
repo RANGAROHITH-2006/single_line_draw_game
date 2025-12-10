@@ -17,7 +17,7 @@ class DrawController extends ChangeNotifier {
   List<Offset> userPath = [];
   Path? svgPath;
   double tolerance =
-      16.0; // Hit detection tolerance in pixels (balanced for accuracy and smoothness)
+      16.0; // Hit detection tolerance in pixels (optimized for accuracy)
 
   // Continuous range-based tracking (instead of discrete dots)
   // Each segment has a list of drawn ranges [start, end] along its length
@@ -27,6 +27,9 @@ class DrawController extends ChangeNotifier {
   // Track the currently active segment index to prevent filling multiple edges at vertices
   int? _activeSegmentIndex;
   double? _lastDistanceOnSegment;
+
+  // Track drawing direction
+  bool? _drawingForward; // true = toward end, false = toward start
 
   // Track which segments have been significantly drawn (> 20% filled)
   Set<int> _drawnSegments = {};
@@ -138,21 +141,26 @@ class DrawController extends ChangeNotifier {
 
     final localPosition = details.localPosition;
 
-    // Check if starting position is on a VERTEX only (not middle of line)
-    if (_isPointOnVertex(localPosition)) {
+    // Check if starting position is on the path (vertex or middle)
+    if (_isPointOnPath(localPosition)) {
       isDrawing = true;
       userPath.clear();
       userPath.add(localPosition);
+
       // Reset ranges for all segments
       drawnRanges = List.generate(pathSegments.length, (_) => []);
+
       // Reset active segment tracking
       _activeSegmentIndex = null;
       _lastDistanceOnSegment = null;
+      _drawingForward = null;
+      _drawnSegments.clear();
+
       progress = 0.0;
       errorMessage = null;
 
-      // Mark starting segment as drawn and set it as active
-      _markSegmentAsDrawnAndSetActiveFromVertex(localPosition);
+      // Find segment and auto-fill from start point to nearest endpoint
+      _initializeSegmentWithAutoFill(localPosition);
 
       notifyListeners();
     }
@@ -214,23 +222,10 @@ class DrawController extends ChangeNotifier {
     drawnRanges = List.generate(pathSegments.length, (_) => []);
     _activeSegmentIndex = null;
     _lastDistanceOnSegment = null;
+    _drawingForward = null;
     _drawnSegments.clear();
     onGameReset?.call();
     notifyListeners();
-  }
-
-  /// Check if a point is on a vertex (only endpoints of segments)
-  bool _isPointOnVertex(Offset point) {
-    if (transformedVertices.isEmpty) return false;
-
-    // Check if point is near any vertex with stricter tolerance
-    for (final vertex in transformedVertices) {
-      final distance = (point - vertex).distance;
-      if (distance <= tolerance) {
-        return true;
-      }
-    }
-    return false;
   }
 
   /// Check if a point is on or near the SVG path
@@ -238,31 +233,32 @@ class DrawController extends ChangeNotifier {
     if (svgPath == null) return false;
 
     // Optimization: Check active segment first (most likely to be on it)
-    // Use slightly relaxed tolerance for active segment to allow continuous filling
+    // Use fine-grained sampling for smooth movement without stuttering
     if (_activeSegmentIndex != null &&
         _activeSegmentIndex! < pathSegments.length) {
       final pathMetric = pathSegments[_activeSegmentIndex!];
       final length = pathMetric.length;
 
-      // Use normal tolerance for active segment (was 0.9, now 1.0)
-      double strictTolerance = tolerance;
-      for (double distance = 0; distance < length; distance += 2.0) {
+      // Use very fine sampling (0.5 steps) for smooth, accurate detection
+      // Slightly relaxed tolerance for active segment to prevent stuttering
+      double activeTolerance = tolerance * 1.2;
+      for (double distance = 0; distance < length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
-          if (currentDistance <= strictTolerance) {
+          if (currentDistance <= activeTolerance) {
             return true;
           }
         }
       }
     }
 
-    // If not on active segment, check all segments with larger steps
+    // If not on active segment, check all segments with fine sampling
     for (ui.PathMetric pathMetric in pathSegments) {
       final length = pathMetric.length;
 
-      // Use larger steps (2.0 instead of 0.5) for much better performance
-      for (double distance = 0; distance < length; distance += 2.0) {
+      // Use fine steps (0.5) for accurate detection across all segments
+      for (double distance = 0; distance < length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
@@ -275,52 +271,9 @@ class DrawController extends ChangeNotifier {
     return false;
   }
 
-  /// Mark a point on the path as drawn and set the active segment
-  /// This is used when starting a new drawing stroke
-  void _markSegmentAsDrawnAndSetActive(Offset point) {
-    // Find the single closest point across ALL segments
-    int? bestSegmentIndex;
-    double? bestDistance;
-    double bestMinDist = double.infinity;
-
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
-      final pathMetric = pathSegments[segmentIndex];
-      final length = pathMetric.length;
-
-      // Use larger steps (2.0) for better performance during segment marking
-      for (double distance = 0; distance <= length; distance += 2.0) {
-        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-        if (tangent != null) {
-          final double currentDist = (point - tangent.position).distance;
-          if (currentDist <= tolerance && currentDist < bestMinDist) {
-            bestMinDist = currentDist;
-            bestSegmentIndex = segmentIndex;
-            bestDistance = distance;
-          }
-        }
-      }
-    }
-
-    // Set the active segment and mark it as drawn
-    if (bestSegmentIndex != null && bestDistance != null) {
-      _activeSegmentIndex = bestSegmentIndex;
-      _lastDistanceOnSegment = bestDistance;
-
-      final length = pathSegments[bestSegmentIndex].length;
-      // Add a small range around this point
-      double rangeStart = (bestDistance - tolerance / 2).clamp(0, length);
-      double rangeEnd = (bestDistance + tolerance / 2).clamp(0, length);
-      _addRange(bestSegmentIndex, rangeStart, rangeEnd);
-    }
-  }
-
-  /// Mark a point on the path as drawn and set the active segment
-  /// No auto-fill from vertices - only marks the touch point on the path
-  void _markSegmentAsDrawnAndSetActiveFromVertex(Offset point) {
+  /// Initialize segment with auto-fill to nearest endpoint
+  /// When user starts from middle, auto-fill to the closest endpoint
+  void _initializeSegmentWithAutoFill(Offset point) {
     // Find the closest point on the path
     int? bestSegmentIndex;
     double? bestDistance;
@@ -334,8 +287,8 @@ class DrawController extends ChangeNotifier {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
 
-      // Use larger steps (2.0) for better performance
-      for (double distance = 0; distance <= length; distance += 2.0) {
+      // Use very fine steps (0.5) for accurate starting point detection
+      for (double distance = 0; distance <= length; distance += 0.5) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDist = (point - tangent.position).distance;
@@ -356,10 +309,20 @@ class DrawController extends ChangeNotifier {
     final pathMetric = pathSegments[bestSegmentIndex];
     final length = pathMetric.length;
 
-    // Just mark a small range around the touch point, no auto-fill from vertices
-    double rangeStart = (bestDistance - tolerance / 2).clamp(0.0, length);
-    double rangeEnd = (bestDistance + tolerance / 2).clamp(0.0, length);
-    _addRange(bestSegmentIndex, rangeStart, rangeEnd);
+    // Determine which endpoint is closer
+    double distToStart = bestDistance;
+    double distToEnd = length - bestDistance;
+
+    // Auto-fill from start point to the NEAREST endpoint
+    if (distToStart <= distToEnd) {
+      // Closer to start - fill from 0 to current position
+      _addRange(bestSegmentIndex, 0.0, bestDistance);
+      _drawingForward = true; // Will draw toward the end
+    } else {
+      // Closer to end - fill from current position to end
+      _addRange(bestSegmentIndex, bestDistance, length);
+      _drawingForward = false; // Will draw toward the start
+    }
   }
 
   /// Add a range to a segment, merging with existing overlapping ranges
@@ -372,8 +335,8 @@ class DrawController extends ChangeNotifier {
     List<List<double>> newRanges = [];
 
     for (var range in ranges) {
-      // Check if ranges overlap or are adjacent (within 3 pixels for smoother drawing)
-      if (start <= range[1] + 3 && end >= range[0] - 3) {
+      // Check if ranges overlap or are adjacent (within 2 pixels for smoother drawing)
+      if (start <= range[1] + 2 && end >= range[0] - 2) {
         // Merge ranges
         start = start < range[0] ? start : range[0];
         end = end > range[1] ? end : range[1];
@@ -390,7 +353,7 @@ class DrawController extends ChangeNotifier {
     // Merge any remaining overlapping ranges after sorting
     List<List<double>> finalRanges = [];
     for (var range in newRanges) {
-      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 3) {
+      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 2) {
         finalRanges.add(range);
       } else {
         finalRanges.last[1] =
@@ -401,110 +364,100 @@ class DrawController extends ChangeNotifier {
     drawnRanges[segmentIndex] = finalRanges;
   }
 
-  /// Fill path between two points, staying on the active segment or transitioning to a new one
-  /// This prevents filling multiple edges at vertices
+  /// Fill path between two points with gap auto-fill and strict single-segment control
+  /// Implements: gap auto-fill for fast movements, strict single-line filling, partial filling
   void _fillPathBetweenOnActiveSegment(Offset startPoint, Offset endPoint) {
     // Calculate the screen distance between the two touch points
     double screenDistance = (endPoint - startPoint).distance;
 
-    // If points are too far apart on screen, don't fill (user may have lifted finger)
-    if (screenDistance > tolerance * 3) {
+    // STRICT SINGLE-SEGMENT RULE: Only work on the active segment
+    if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) {
       return;
     }
 
-    // First, check if we can continue on the current active segment
-    if (_activeSegmentIndex != null) {
-      double? endDistOnActive = _findClosestDistanceOnSegment(
-        endPoint,
-        _activeSegmentIndex!,
-      );
+    // Find where the end point is on the ACTIVE segment only
+    double? endDistOnActive = _findClosestDistanceOnSegment(
+      endPoint,
+      _activeSegmentIndex!,
+    );
 
-      if (endDistOnActive != null && _lastDistanceOnSegment != null) {
-        // Calculate path distance on the active segment
-        double pathDistance = (endDistOnActive - _lastDistanceOnSegment!).abs();
+    // If point is not on active segment, check if we should transition
+    if (endDistOnActive == null) {
+      // Only transition if we're at an endpoint and there's a connected segment
+      _checkAndTransitionAtEndpoint(endPoint, screenDistance);
+      return;
+    }
 
-        // For fast movements, be stricter to prevent jumping to parallel lines
-        double maxRatio = screenDistance > 20 ? 3.0 : 4.5;
+    // Calculate path distance on the active segment
+    double pathDistance = (endDistOnActive - _lastDistanceOnSegment!).abs();
+    final length = pathSegments[_activeSegmentIndex!].length;
 
-        // Stricter condition: path distance should be proportional to screen distance
-        bool isReasonableDistance =
-            pathDistance <= screenDistance * maxRatio + 12;
+    // Check if movement is in the correct direction
+    bool movingForward = endDistOnActive > _lastDistanceOnSegment!;
 
-        // Also allow very small movements for smooth continuous drawing
-        bool isSmallMovement = pathDistance <= tolerance * 1.2;
+    // Set drawing direction on first movement
+    if (_drawingForward == null) {
+      _drawingForward = movingForward;
+    }
 
-        if (isReasonableDistance || isSmallMovement) {
-          final length = pathSegments[_activeSegmentIndex!].length;
-          double rangeStart =
-              (_lastDistanceOnSegment! < endDistOnActive
-                  ? _lastDistanceOnSegment!
-                  : endDistOnActive);
-          double rangeEnd =
-              (_lastDistanceOnSegment! > endDistOnActive
-                  ? _lastDistanceOnSegment!
-                  : endDistOnActive);
-          _addRange(
-            _activeSegmentIndex!,
-            rangeStart.clamp(0, length),
-            rangeEnd.clamp(0, length),
-          );
-          _lastDistanceOnSegment = endDistOnActive;
+    // ADJACENT POINT CHECK: Only fill if points are truly adjacent
+    // Use strict multiplier to prevent filling multiple segments at once
+    // This ensures user must trace each segment accurately
+    double maxAllowedPathDistance = screenDistance * 1.8 + tolerance * 2;
 
-          // Mark segment as drawn if it's significantly filled
-          if (_getSegmentFilledRatio(_activeSegmentIndex!) > 0.2) {
-            _drawnSegments.add(_activeSegmentIndex!);
-          }
+    // If path distance is much larger than screen distance, points aren't adjacent
+    if (pathDistance > maxAllowedPathDistance) {
+      // Not adjacent - don't fill this gap
+      return;
+    }
 
-          return;
-        }
-      }
+    // Additional smoothness: allow small jumps for very close points
+    if (screenDistance < tolerance * 0.8 && pathDistance < tolerance * 1.5) {
+      // Very close movement - always fill for smoothness
+    }
 
-      // If point not found on active segment, check if we're at an edge
-      // and try to transition to a connected segment
-      if (_lastDistanceOnSegment != null) {
-        final activeLength = pathSegments[_activeSegmentIndex!].length;
-        bool nearEdge =
-            _lastDistanceOnSegment! < tolerance * 3 ||
-            _lastDistanceOnSegment! > activeLength - tolerance * 3;
+    // PARTIAL FILLING: Only fill the portion the user actually covers
+    double rangeStart =
+        _lastDistanceOnSegment! < endDistOnActive
+            ? _lastDistanceOnSegment!
+            : endDistOnActive;
+    double rangeEnd =
+        _lastDistanceOnSegment! > endDistOnActive
+            ? _lastDistanceOnSegment!
+            : endDistOnActive;
 
-        if (nearEdge) {
-          // Try to transition to connected segment
-          _tryTransitionToConnectedSegment(endPoint, screenDistance);
-          return;
-        }
-      }
+    // Auto-fill the gap between last and current position
+    _addRange(
+      _activeSegmentIndex!,
+      rangeStart.clamp(0, length),
+      rangeEnd.clamp(0, length),
+    );
 
-      // Check if we've reached the end of the current segment and need to transition
-      // to a connected segment
-      _tryTransitionToConnectedSegment(endPoint, screenDistance);
-    } else {
-      // No active segment set, find the best one
-      _markSegmentAsDrawnAndSetActive(endPoint);
+    _lastDistanceOnSegment = endDistOnActive;
+
+    // Mark segment as drawn if it's significantly filled
+    if (_getSegmentFilledRatio(_activeSegmentIndex!) > 0.2) {
+      _drawnSegments.add(_activeSegmentIndex!);
     }
   }
 
-  /// Try to transition from the current active segment to a connected segment
-  /// This handles cases where the user traces past a vertex to a new edge
-  void _tryTransitionToConnectedSegment(Offset point, double screenDistance) {
+  /// Check if we're at an endpoint and should transition to a connected segment
+  void _checkAndTransitionAtEndpoint(Offset point, double screenDistance) {
     if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) return;
 
     final activeMetric = pathSegments[_activeSegmentIndex!];
     final activeLength = activeMetric.length;
 
-    // Check if we're near the start or end of the active segment
-    // Use more generous threshold (tolerance * 4) for better edge detection
-    bool nearStart = _lastDistanceOnSegment! < tolerance * 4;
-    bool nearEnd = _lastDistanceOnSegment! > activeLength - tolerance * 4;
+    // Check if we're AT an endpoint (relaxed for smooth transitions)
+    bool nearStart = _lastDistanceOnSegment! < tolerance * 2.5;
+    bool nearEnd = _lastDistanceOnSegment! > activeLength - tolerance * 2.5;
 
     if (!nearStart && !nearEnd) {
-      // We're in the middle of the segment but the point isn't on it
-      // This shouldn't normally happen if _isPointOnPath returned true
-      // Try to find the closest segment
-      _markSegmentAsDrawnAndSetActive(point);
+      // Not at an endpoint - don't transition
       return;
     }
 
-    // Get the endpoint position of the current segment
+    // Get the endpoint position
     Offset? endpointPos;
     if (nearEnd) {
       final tangent = activeMetric.getTangentForOffset(activeLength);
@@ -516,7 +469,7 @@ class DrawController extends ChangeNotifier {
 
     if (endpointPos == null) return;
 
-    // Find segments that connect at this vertex (their start or end is near this endpoint)
+    // Find ONE connected segment
     int? bestNewSegment;
     double? bestDistanceOnNewSegment;
     double bestMinDist = double.infinity;
@@ -528,9 +481,8 @@ class DrawController extends ChangeNotifier {
     ) {
       if (segmentIndex == _activeSegmentIndex) continue;
 
-      // Skip segments that have already been significantly drawn (> 20% filled)
-      double segmentFilledRatio = _getSegmentFilledRatio(segmentIndex);
-      if (segmentFilledRatio > 0.2) continue;
+      // Skip already drawn segments
+      if (_drawnSegments.contains(segmentIndex)) continue;
 
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
@@ -539,30 +491,27 @@ class DrawController extends ChangeNotifier {
       final startTangent = pathMetric.getTangentForOffset(0);
       final endTangent = pathMetric.getTangentForOffset(length);
 
-      // Use more generous tolerance (tolerance * 3) for connection detection
       bool connectsAtStart =
           startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 3;
+          (startTangent.position - endpointPos).distance < tolerance * 3.0;
       bool connectsAtEnd =
           endTangent != null &&
-          (endTangent.position - endpointPos).distance < tolerance * 3;
+          (endTangent.position - endpointPos).distance < tolerance * 3.0;
 
       if (!connectsAtStart && !connectsAtEnd) continue;
 
-      // This segment connects - check if the current point is on it
+      // Check if the current point is on this segment near the connection
       double? distOnSegment = _findClosestDistanceOnSegment(
         point,
         segmentIndex,
       );
-      if (distOnSegment != null) {
-        // Verify the point is being traced from the connection point
-        // (not jumping to the middle of the segment)
-        double expectedStartDist = connectsAtStart ? 0 : length;
-        double distFromConnection = (distOnSegment - expectedStartDist).abs();
 
-        // More lenient acceptance for continuous drawing
-        // Allow up to tolerance * 5 from connection point
-        if (distFromConnection < tolerance * 5 + screenDistance * 3) {
+      if (distOnSegment != null) {
+        // Must be near the connection point (relaxed for smooth transitions)
+        double expectedDist = connectsAtStart ? 0 : length;
+        double distFromConnection = (distOnSegment - expectedDist).abs();
+
+        if (distFromConnection < tolerance * 3.5) {
           final currentDist = _getDistanceFromPoint(
             point,
             segmentIndex,
@@ -577,9 +526,9 @@ class DrawController extends ChangeNotifier {
       }
     }
 
-    // Transition to the new segment if found
+    // Transition if found
     if (bestNewSegment != null && bestDistanceOnNewSegment != null) {
-      // First, fill to the end of the current segment
+      // Fill to end of current segment
       final length = pathSegments[_activeSegmentIndex!].length;
       if (nearEnd) {
         _addRange(_activeSegmentIndex!, _lastDistanceOnSegment!, length);
@@ -587,37 +536,39 @@ class DrawController extends ChangeNotifier {
         _addRange(_activeSegmentIndex!, 0, _lastDistanceOnSegment!);
       }
 
-      // Now switch to the new segment
-      _activeSegmentIndex = bestNewSegment;
+      // Mark old segment as completed
+      _drawnSegments.add(_activeSegmentIndex!);
 
-      // Determine which end of the new segment we're starting from
+      // Switch to new segment
+      _activeSegmentIndex = bestNewSegment;
+      _lastDistanceOnSegment = bestDistanceOnNewSegment;
+      _drawingForward = null;
+
+      // Auto-fill from touch point to nearest endpoint
       final newMetric = pathSegments[bestNewSegment];
       final newLength = newMetric.length;
       final startTangent = newMetric.getTangentForOffset(0);
 
-      bool startsFromBeginning =
+      bool connectsAtStart =
           startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 2;
+          (startTangent.position - endpointPos).distance < tolerance * 3.0;
 
-      // Add range from the connection point to current position
-      if (startsFromBeginning) {
-        _addRange(
-          bestNewSegment,
-          0,
-          bestDistanceOnNewSegment.clamp(0, newLength),
-        );
+      double distToStart = bestDistanceOnNewSegment;
+      double distToEnd = newLength - bestDistanceOnNewSegment;
+
+      if (connectsAtStart) {
+        if (distToStart <= distToEnd) {
+          _addRange(bestNewSegment, 0, bestDistanceOnNewSegment);
+        } else {
+          _addRange(bestNewSegment, bestDistanceOnNewSegment, newLength);
+        }
       } else {
-        _addRange(
-          bestNewSegment,
-          bestDistanceOnNewSegment.clamp(0, newLength),
-          newLength,
-        );
+        if (distToEnd <= distToStart) {
+          _addRange(bestNewSegment, bestDistanceOnNewSegment, newLength);
+        } else {
+          _addRange(bestNewSegment, 0, bestDistanceOnNewSegment);
+        }
       }
-
-      _lastDistanceOnSegment = bestDistanceOnNewSegment;
-    } else {
-      // Couldn't find a connected segment, try to find any segment the point is on
-      _markSegmentAsDrawnAndSetActive(point);
     }
   }
 
@@ -659,14 +610,13 @@ class DrawController extends ChangeNotifier {
     double? closestDistance;
     double minDist = double.infinity;
 
-    // Use adaptive sampling: larger steps for longer paths
-    double step = length > 200 ? 3.0 : (length > 100 ? 2.0 : 1.0);
-
-    for (double distance = 0; distance <= length; distance += step) {
+    // Use consistent fine sampling (0.5 steps) for accurate distance finding
+    // This prevents stuttering and ensures smooth movement
+    for (double distance = 0; distance <= length; distance += 0.5) {
       final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
       if (tangent != null) {
         final double currentDist = (point - tangent.position).distance;
-        if (currentDist <= tolerance && currentDist < minDist) {
+        if (currentDist <= tolerance * 1.3 && currentDist < minDist) {
           minDist = currentDist;
           closestDistance = distance;
         }
